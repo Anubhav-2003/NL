@@ -6,6 +6,7 @@ from torch.func import grad, vmap, functional_call
 # (LFLTM) stands for Low Fidelity Long-Term Memory
 class LFLTM_MLP(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim):
+        super().__init__()
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.output_dim = output_dim
