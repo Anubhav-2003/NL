@@ -3,7 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.func import grad, vmap, functional_call
 
-# (LFLTM) stands for Low Fidelity Long-Term Memory
+# (LFLTM) stands for Low Fidelity Long-Term Memory.
+# This is a stateless MLP.
 #This MLP expects as input a flattened Vector as its state (Parameters), which we slice on the go.
 class FlatLFLTM_MLP(nn.Module):
     def __init__(self, input_dim, hidden_dim):
