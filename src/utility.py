@@ -12,4 +12,4 @@ def prepare_local_shards(X, shard_size):
     num_shards = X[1] // shard_size
     X_sharded = X.view(B * num_shards, shard_size, D)
 
-    return X_sharded, pad_len
+    return X_sharded, pad_len, num_shards

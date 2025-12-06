@@ -2,47 +2,85 @@ import torch
 from torch.func import grad, vmap, functional_call
 from torch import nn as nn
 from src.DeepOptimizers import DeepOptimizers
+from src.QKProjection import QKProjection
+from src.utility import prepare_local_shards
 
-# We are using the MAC (Memory-as-Context) paradigm.
-class TitanBlock(nn.Module):
-    def __init__(self, LFLTM, Attention, config):
+class NeualMemoryCell(nn.Module):
+    def __init__(self, LFLTM, config):
         super().__init__()
         self.LFLTM = LFLTM
-        self.HFSTM = Attention
         self.DeepOptimizer = DeepOptimizers(config.meta_input_dim, config.meta_hidden_dim)
         self.lr = 0.01
         self.weight_decay = 0.01
     
-    def forward(self, x_t, memory_state, optimizer_params = None):
-        # This is the part used for standard inference. The Output
-        # of the final attention will be passed to the MLP for Casual LM
-
-        if optimizer_params is None:
-            optimizer_params = self.DeepOptimizer.init_params()
-            optimizer_params = optimizer_params.to(x_t.device)
-
-        h_t = self.LFLTM(memory_state, x_t)
-
-        attn_inp = torch.cat([h_t, x_t], dim = -1)
-        attn_out = self.HFSTM(attn_inp)
-
-        # This is where Test-Time-Training(TTT) Starts.
-        def compute_loss(params, x):
+    def compute_gradients_and_updates(self, x_t, x_target, mem_state, opt_params):
+        def compute_loss(params, x, target):
             pred = self.LFLTM(params, x)
-            loss = torch.mean((pred - x) ** 2)
-            return loss
+            return torch.mean((pred - target) ** 2)
+
+        gradient = grad(compute_loss)(mem_state, x_t, x_target)
+
+        base_update, opt_update = self.DeepOptimizer(opt_params, gradient)
         
-        gradient = grad(compute_loss)(memory_state, x_t)
+        total_mem_update = (self.lr * base_update) + (self.weight_decay * mem_state)
+        
+        return total_mem_update, opt_update
 
-        new_optimizer_state, new_optimizer_params = self.DeepOptimizer(optimizer_params, gradient)
-        update_step = (self.lr * new_optimizer_state) + (self.weight_decay * memory_state)
-        new_memory_state = memory_state - update_step
-
-        return attn_out, new_memory_state.detach(), new_optimizer_params.detach(), new_optimizer_state.detach()
-
-
-
-
+    def retrieve(self, x_t, current_mem_params):
+        return self.LFLTM(current_mem_params, x_t)
     
+    def forward(self, x_t, memory_state, optimizer_params, optimizerx_target = None):
+        if x_target is None:
+            x_target = x_t
+        
+        h_t = self.retrieve(x_t, memory_state)
+        update = self.compute_gradients_and_updates(x_t, x_target, memory_state, optimizer_params)
+        new_memory_state = memory_state - update
+        
+        return h_t, new_memory_state
 
-    
+
+class TNTLocalBranch(nn.Module):
+    def __init__(self, NeualMemoryCell, shard_size, dim):
+        super().__init__()
+        self.NeualMemoryCell = NeualMemoryCell
+        self.shard_size = shard_size
+        self.dim = dim
+        self.qk_proj = QKProjection(dim)
+
+        self.init_mem_params = nn.Parameter(self.NeualMemoryCell.LFLTM.init_params())
+        self.init_opt_params = nn.Parameter(self.NeualMemoryCell.DeepOptimizer.init_params())
+
+    def foward(self, X):
+        B, L, D = X.shape
+
+        X_sharded, Pad_len, num_of_shards = prepare_local_shards(X)
+
+        X_projected = self.qk_proj(Q=X_sharded, K=X_sharded)
+        new_batch_size = B * num_of_shards
+
+        mem_state = self.init_mem_params.unsqueeze(0).expand(new_batch_size, -1)
+        opt_state = self.init_opt_params.unsqueeze(0).expand(new_batch_size, -1)
+        
+        def get_all_updates(x_seq, mem, opt):
+            return vmap(self.NeualMemoryCell.compute_gradients_and_updates, (0, 0, None, None))(
+                x_seq, x_seq, mem, opt
+            )
+
+        mem_updates, opt_updates = vmap(get_all_updates)(X_sharded, mem_state, opt_state)
+
+        cumulative_mem_updates = torch.cumsum(mem_updates, dim=1)
+        mem_state_sequence = mem_state.unsqueeze(1) - cumulative_mem_updates
+
+        cumulative_opt_updates = torch.cumsum(opt_updates, dim=1)
+
+        def retrieve_batch(q_seq, mem_seq):
+            return vmap(self.NeualMemoryCell.retrieve)(q_seq, mem_seq)
+
+        outputs = vmap(retrieve_batch)(X_projected, mem_state_sequence)
+
+        outputs = outputs.view(B, num_of_shards * self.shard_size, self.dim)
+        if Pad_len > 0:
+            outputs = outputs[:, :-Pad_len, :]
+            
+        return outputs

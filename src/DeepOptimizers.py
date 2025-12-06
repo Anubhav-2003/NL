@@ -14,7 +14,7 @@ class DeepOptimizers(nn.Module):
         return self.mlp.init_params()
     
     def forward(self, optimizer_params, grad):
-        momentum_vector = self.mlp(optimizer_params, input)
+        momentum_vector = self.mlp(optimizer_params, grad)
 
         def compute_meta_loss(params, input):
             pred = self.mlp(params, input)
