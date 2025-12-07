@@ -72,7 +72,7 @@ class TNTLocalBranch(nn.Module):
         cumulative_mem_updates = torch.cumsum(mem_updates, dim=1)
         mem_state_sequence = mem_state.unsqueeze(1) - cumulative_mem_updates
 
-        cumulative_opt_updates = torch.cumsum(opt_updates, dim=1)
+        # cumulative_opt_updates = torch.cumsum(opt_updates, dim=1), would be used during sequential inference, not parallel training 
 
         def retrieve_batch(q_seq, mem_seq):
             return vmap(self.NeualMemoryCell.retrieve)(q_seq, mem_seq)
@@ -82,5 +82,63 @@ class TNTLocalBranch(nn.Module):
         outputs = outputs.view(B, num_of_shards * self.shard_size, self.dim)
         if Pad_len > 0:
             outputs = outputs[:, :-Pad_len, :]
+            
+        return outputs
+
+class TNTGlobalBranch(nn.Module):
+    def __init__(self, neural_memory_cell, chunk_size, dim):
+        super().__init__()
+        self.NeualMemoryCell = neural_memory_cell
+        self.chunk_size = chunk_size
+        self.dim = dim
+
+        self.init_mem_params = nn.Parameter(self.NeualMemoryCell.LFLTM.init_params())
+        self.init_opt_params = nn.Parameter(self.NeualMemoryCell.DeepOptimizer.init_params())
+
+    def forward(self, X):
+        B, L, D = X.shape
+
+        pad_len = (self.chunk_size - (L % self.chunk_size)) % self.chunk_size
+        if pad_len > 0:
+            X = torch.nn.functional.pad(X, (0, 0, 0, pad_len))
+        
+        num_chunks = X.shape[1] // self.chunk_size
+        X_chunked = X.view(B, num_chunks, self.chunk_size, D)
+
+        total_padded_len = num_chunks * self.chunk_size
+        outputs = torch.empty(B, total_padded_len, D, device=X.device, dtype=X.dtype)
+
+        curr_mem_state = self.init_mem_params.unsqueeze(0).expand(B, -1)
+        curr_opt_params = self.init_opt_params.unsqueeze(0).expand(B, -1)
+
+        def compute_chunk_updates(x_seq, mem, opt):
+            return vmap(self.NeualMemoryCell.compute_gradients_and_updates, (0, 0, None, None))(
+                x_seq, x_seq, mem, opt
+            )
+
+        def compute_chunk_retrieval(q_seq, mem_seq):
+            return vmap(self.NeualMemoryCell.retrieve)(q_seq, mem_seq)
+
+        for i in range(num_chunks):
+            X_curr = X_chunked[:, i, :, :]
+
+            mem_updates, opt_updates = vmap(compute_chunk_updates)(
+                X_curr, curr_mem_state, curr_opt_params
+            )
+
+            cum_mem_updates = torch.cumsum(mem_updates, dim=1)
+            mem_path = curr_mem_state.unsqueeze(1) - cum_mem_updates
+            
+            cum_opt_updates = torch.cumsum(opt_updates, dim=1)
+            
+            chunk_out = vmap(compute_chunk_retrieval)(X_curr, mem_path)
+            
+            outputs[:, i*self.chunk_size : (i+1)*self.chunk_size, :] = chunk_out
+
+            curr_mem_state = curr_mem_state - cum_mem_updates[:, -1, :]
+            curr_opt_params = curr_opt_params - cum_opt_updates[:, -1, :]
+
+        if pad_len > 0:
+            outputs = outputs[:, :-pad_len, :]
             
         return outputs
