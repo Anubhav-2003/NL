@@ -5,7 +5,9 @@ import os
 import math
 import time
 from tqdm import tqdm
-
+from src.S2 import TitansModel
+from src.config import TitansConfig
+from src.data_loader import setup_data_pipeline
 from src.data_loader import setup_data_pipeline
 
 DRIVE_DATA_PATH = "/content/drive/My Drive/Titans_Project_Data"
