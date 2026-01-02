@@ -1,7 +1,5 @@
 from torch.functional import F
 
-# We convert the input X: [Batch Size, Seq Len, Dim] -> [Batch Size * Num Of Shards, Shard_size, dim] 
-# for fast parallel training using TNT.
 def prepare_local_shards(X, shard_size):
     B, L, D = X.shape
 

@@ -1,7 +1,4 @@
 class TitansConfig:
-    """
-    Configuration class to hold hyperparameters for TitansTNT Model.
-    """
     def __init__(self, 
                  vocab_size=32000,
                  dim=768,
@@ -12,7 +9,7 @@ class TitansConfig:
                  memory_input_dim=768,
                  memory_hidden_dim=2048, 
                  meta_hidden_dim=512,
-                 meta_input_dim=None,    # <--- NEW ARGUMENT ADDED HERE
+                 meta_input_dim=None,
                  dropout=0.1,
                  num_persistent_tokens=4,
                  rope_base=10000.0,      
@@ -29,7 +26,6 @@ class TitansConfig:
         self.memory_hidden_dim = memory_hidden_dim
         self.meta_hidden_dim = meta_hidden_dim
         
-        # Use passed value if available, otherwise default to dim
         self.meta_input_dim = meta_input_dim if meta_input_dim is not None else dim 
         
         self.dropout = dropout

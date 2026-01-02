@@ -49,9 +49,6 @@ class TitansModel(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(self, input_ids, targets=None):
-        """
-        input_ids: (Batch, Seq_Len)
-        """
         B, L = input_ids.shape
         
         x = self.token_emb(input_ids)
@@ -62,19 +59,7 @@ class TitansModel(nn.Module):
         total_len = L + P
         cos_full, sin_full = self.rope(x, seq_len=total_len)
         
-        # We pass the full cos/sin. The Core branch (Attention) will see L+P tokens and use all.
-        # The Local branch only sees L tokens. We slice cos/sin for it inside the block or pass sliced.
-        
-        # Let's verify how Titan_main uses it. 
-        # In Titan_main, Core branch concats pmem + x -> Length P+L. 
-        # So we should pass the full cos/sin.
-        # Local branch uses x -> Length L. We should assume it handles its own internal RoPE logic
-        # (which it does, it has its own self.rope instance).
-        
-        # So here we prepare cos/sin specifically for the Core Branch's Attention.
-        
         for layer in self.layers:
-            # We pass the full cos/sin required for the Core Branch attention
             x = layer(x, cos_full, sin_full)
             
         x = self.norm_f(x)
@@ -99,7 +84,7 @@ if __name__ == "__main__":
         depth=4, 
         global_chunk_size=32, 
         local_shard_size=8,
-        rope_dim=32 # 128 / 4 heads
+        rope_dim=32
     )
     
     device = "cuda" if torch.cuda.is_available() else "cpu"

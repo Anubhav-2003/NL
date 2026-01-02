@@ -2,8 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# This is the Deep Optimizer Module as per the "Nested Learning" paradigm. 
-# This can be instantiated to act as Momentum, Velocity etc.
 class OptimizerMLP(nn.Module):
     def __init__(self, input_dim, hidden_dim):
         super().__init__()
