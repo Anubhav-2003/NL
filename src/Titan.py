@@ -4,6 +4,7 @@ from torch import nn as nn
 from src.DeepOptimizers import DeepOptimizers
 from src.QKProjection import QKProjection
 from src.utility import prepare_local_shards
+from src.rope import RotaryPositionalEmbedding, apply_rotary_pos_emb
 
 class NeualMemoryCell(nn.Module):
     def __init__(self, LFLTM, config):
@@ -29,19 +30,19 @@ class NeualMemoryCell(nn.Module):
     def retrieve(self, x_t, current_mem_params):
         return self.LFLTM(current_mem_params, x_t)
     
-    def forward(self, x_t, memory_state, optimizer_params, optimizerx_target = None):
+    def forward(self, x_t, memory_state, optimizer_params, x_target = None):
         if x_target is None:
             x_target = x_t
         
         h_t = self.retrieve(x_t, memory_state)
-        update = self.compute_gradients_and_updates(x_t, x_target, memory_state, optimizer_params)
+        update, opt_update = self.compute_gradients_and_updates(x_t, x_target, memory_state, optimizer_params)
         new_memory_state = memory_state - update
         
         return h_t, new_memory_state
 
 
 class TNTLocalBranch(nn.Module):
-    def __init__(self, NeualMemoryCell, shard_size, dim):
+    def __init__(self, NeualMemoryCell, shard_size, dim, rope_dim=None):
         super().__init__()
         self.NeualMemoryCell = NeualMemoryCell
         self.shard_size = shard_size
@@ -51,14 +52,38 @@ class TNTLocalBranch(nn.Module):
         self.init_mem_params = nn.Parameter(self.NeualMemoryCell.LFLTM.init_params())
         self.init_opt_params = nn.Parameter(self.NeualMemoryCell.DeepOptimizer.init_params())
 
-    def foward(self, X):
+        # Local Branch RoPE:
+        # We apply RoPE to the shards so that the QKProjection (K @ K.T) 
+        # encodes relative position within the shard.
+        if rope_dim is None: rope_dim = dim
+        self.rope = RotaryPositionalEmbedding(rope_dim)
+
+    def forward(self, X):
         B, L, D = X.shape
 
-        X_sharded, Pad_len, num_of_shards = prepare_local_shards(X)
+        X_sharded, Pad_len, num_of_shards = prepare_local_shards(X, self.shard_size)
 
-        X_projected = self.qk_proj(Q=X_sharded, K=X_sharded)
+        # 1. Generate RoPE for the shard size
+        # We use positions 0..shard_size for every shard
+        cos, sin = self.rope(X_sharded, seq_len=self.shard_size)
+        
+        # 2. Apply RoPE to X_sharded. 
+        # X_sharded acts as both Q and K in the QKProjection.
+        # We assume X_sharded is [Batch*Shards, Shard_Size, Dim]
+        # apply_rotary_pos_emb expects [..., Dim] inputs and [Seq, Dim] cos/sin
+        
+        # Ensure cos/sin broadcast correctly over the Batch dimension
+        # X_sharded: [B*N, S, D], cos: [S, D]
+        # We need to verify dimensionality for the helper function
+        # Our helper handles [B, L, H, D] or [B, L, D]. 
+        # Here we have [Batch, Seq, Dim], so it fits.
+        
+        X_rotated, _ = apply_rotary_pos_emb(X_sharded, X_sharded, cos, sin)
+
+        # 3. Project using Rotated X
+        X_projected = self.qk_proj(Q=X_rotated, K=X_rotated)
+        
         new_batch_size = B * num_of_shards
-
         mem_state = self.init_mem_params.unsqueeze(0).expand(new_batch_size, -1)
         opt_state = self.init_opt_params.unsqueeze(0).expand(new_batch_size, -1)
         
@@ -67,16 +92,17 @@ class TNTLocalBranch(nn.Module):
                 x_seq, x_seq, mem, opt
             )
 
+        # Note: Updates are computed on original X (Features), not Rotated X (Attention)
+        # This keeps the memory content clean, while attention scores are position-aware.
         mem_updates, opt_updates = vmap(get_all_updates)(X_sharded, mem_state, opt_state)
 
         cumulative_mem_updates = torch.cumsum(mem_updates, dim=1)
         mem_state_sequence = mem_state.unsqueeze(1) - cumulative_mem_updates
 
-        # cumulative_opt_updates = torch.cumsum(opt_updates, dim=1), would be used during sequential inference, not parallel training 
-
         def retrieve_batch(q_seq, mem_seq):
             return vmap(self.NeualMemoryCell.retrieve)(q_seq, mem_seq)
 
+        # Retrieve using Projected (Rotated) Queries vs Memory
         outputs = vmap(retrieve_batch)(X_projected, mem_state_sequence)
 
         outputs = outputs.view(B, num_of_shards * self.shard_size, self.dim)

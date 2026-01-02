@@ -13,13 +13,17 @@ class DeepOptimizers(nn.Module):
     def init_params(self):
         return self.mlp.init_params()
     
-    def forward(self, optimizer_params, grad):
-        momentum_vector = self.mlp(optimizer_params, grad)
+    # --- FIX: Renamed argument 'grad' to 'input_grad' ---
+    def forward(self, optimizer_params, input_grad):
+        # Use 'input_grad' for the data
+        momentum_vector = self.mlp(optimizer_params, input_grad)
 
         def compute_meta_loss(params, input):
             pred = self.mlp(params, input)
             return torch.mean((pred - input) ** 2)
         
-        meta_grad = grad(compute_meta_loss)(optimizer_params, grad)
+        # Now 'grad' correctly refers to the torch.func.grad imported at the top
+        meta_grad = grad(compute_meta_loss)(optimizer_params, input_grad)
+        
         new_optimizer_params = (self.beta * optimizer_params) - self.lr * meta_grad
         return momentum_vector, new_optimizer_params
